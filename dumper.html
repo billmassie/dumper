@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Dumper</title>
+    <script type="text/javascript" src="https://ajax.googleapis.com/ajax/libs/jquery/1.9.1/jquery.min.js"></script>
+    <script type="text/javascript">
+        $(function() {
+            $("#dump_form").submit(function() {
+                var params = [];
+
+                $("input[type=text],select").each(function(index, element) {
+                    element = $(element);
+                    var val = $.trim(element.val());
+                    if (val != "") {
+                        params.push(element.attr("name") + "=" + val);
+                    }
+                });
+
+                if (params.length == 0) {
+                    return false;
+                }
+
+                window.location = window.location.pathname + "?" + params.join("&");
+                return false;
+            });
+
+        });
+
+    </script>
+
+</head>
+<body>
+    <pre>
+           ____  __  ____  _______  __________  __
+          / __ \/ / / /  |/  / __ \/ ____/ __ \/ /
+         / / / / / / / /|_/ / /_/ / __/ / /_/ / /
+        / /_/ / /_/ / /  / / ____/ /___/ _, _/_/
+       /_____/\____/_/  /_/_/   /_____/_/ |_(_)
+    </pre>
+    <h1>Let's get started</h1>
+    <p>
+    <form method="GET" id="dump_form">
+        merchant_id: <input type="text" name="pk" /><br />
+        <hr />
+        recent transactions (250 max): <input type="text" name="recent_transactions" /> status:
+        <select name="transaction_status">
+            <option value="" />--</option>
+            <option value="pending" />Pending</option>
+            <option value="authorized" />Authorized</option>
+            <option value="settled" />Settled</option>
+        </select><br />
+        recent cancellations (250 max): <input type="text" name="recent_cancelations" /><br />
+        recent refunds (250 max): <input type="text" name="recent_refunds" /><br />
+        recent payments (250 max): <input type="text" name="recent_payments" /><br />
+        <input type="submit" value="Dump!" />
+        <input type="reset" />
+    </form>
+    </p>
+
+</body>
+</html>
