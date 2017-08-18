@@ -9,7 +9,7 @@ import (
 	_ "github.com/lib/pq"
 	"log"
 	"bytes"
-	//"time"
+	"strings"
 )
 
 var db *sql.DB
@@ -28,23 +28,65 @@ func home(w http.ResponseWriter, r *http.Request) {
 	t.Execute(w, nil)
 }
 
+func getRowCountFromQuery(r *http.Request, key string) (int, bool) {
+	val, ok := r.URL.Query()[key]
+
+	if !ok {
+		return 0, ok
+	} else {
+		rows, err := strconv.Atoi(val[0])
+
+		if err != nil {
+			log.Println(err)
+			return 0, false
+		}
+
+		if rows > 250 {
+			return 250, ok
+		} else {
+			return rows, ok
+		}
+	}
+}
+
 func handleQuery(w http.ResponseWriter, r *http.Request) {
-	//r.URL.Query()
-	if val, ok := r.URL.Query()["recent_payments"]; ok {
-		i, _ := strconv.Atoi(val[0])
-		handleRows(i, w, r)
+	var buffer bytes.Buffer
+
+	log.Println("Query: ", r.URL.Query())
+
+	// Load the query parameters into an array
+	var parameters  []string
+	for key, _ := range r.URL.Query() {
+		parameters = append(parameters, key)
 	}
-	if val, ok := r.URL.Query()["pk"]; ok {
-		i, _ := strconv.Atoi(val[0])
-		handleId(i, w, r)
+
+	log.Println("Parameters: ", parameters)
+
+	if len(parameters) == 0 {
+		home(w,r)
+		return
 	}
+
+	if rowCount, ok := getRowCountFromQuery(r, "recent_books"); ok {
+		buffer = handleRows(rowCount, "book" )
+	} else if strings.HasSuffix(parameters[0], "_id") {
+		// Catchall for id's that don't have special handling.
+		// This check must go after any id's with special handling
+		buffer = handleId(parameters[0], r.URL.Query()[parameters[0]][0])
+	} else {
+		home(w,r)
+		return
+	}
+
+	t, _ := template.ParseFiles("dumper_results.html")
+	t.Execute(w, template.HTML(buffer.String()))
 
 }
 
-func handleRows(rowCount int, w http.ResponseWriter, r *http.Request) {
-	log.Println("in handleRows")
+func handleRows(rowCount int, tableName string) bytes.Buffer {
+	log.Printf("in handleRows. rowCount: %d tableName: %s", rowCount, tableName)
 
-	rows, err := db.Query(fmt.Sprintf("SELECT * FROM test ORDER BY pk LIMIT %d", rowCount))
+	rows, err := db.Query(fmt.Sprintf("SELECT * FROM %s ORDER BY created_at DESC LIMIT %d", tableName, rowCount))
 	defer rows.Close()
 
 	if err != nil {
@@ -52,23 +94,77 @@ func handleRows(rowCount int, w http.ResponseWriter, r *http.Request) {
 	}
 
 
-	buffer := dumpTableToHTML(rows, "Merchants")
+	return dumpTableToHTML(rows, tableName)
+}
 
-	t, _ := template.ParseFiles("dumper_results.html")
-	t.Execute(w, template.HTML(buffer.String()))
+// Maps id column names to the tables where the data lives
+var idname_to_table_map = map[string]string {
+	"book_id" : "book",
+	"author_id" : "author",
 }
 
 
-func handleId(id int, w http.ResponseWriter, r *http.Request) {
+func handleId(id_name string, id string) bytes.Buffer {
+	log.Println("in handleId")
 
-	row, _ := db.Query(fmt.Sprintf("SELECT pk, val FROM test where pk = %d", id))
+	var tableName string
+
+	tableName, ok := idname_to_table_map[id_name]
+	if !ok {
+		var buffer bytes.Buffer
+		buffer.WriteString(fmt.Sprintf("Don't know how to handle_id [%s]", id_name));
+		return buffer
+	}
+
+	row, err := db.Query(fmt.Sprintf("SELECT * FROM %s where %s = '%s'", tableName, id_name, id))
 	defer row.Close()
 
-	buffer := dump2ColTableToHTML(row, "test")
+	if err != nil {
+		log.Println(err)
+		var buffer bytes.Buffer
+		buffer.WriteString(fmt.Sprintf("I had a problem querying [%s]", tableName));
+		return buffer
+	}
+
+	return dump2ColTableToHTML(row, tableName)
+}
+
+// maps column names that don't follow the standard FK naming convention to their linked table
+// If it's a column name that looks like a foreign key, but isn't, like tax_id it will map to a nil
+var non_links = map[string]string {
+	"not_really_an_id" : "",
+}
+
+// column names with special handling
+type fn func (string) string
+var special_map = map[string] fn {
+	"ssn" : getRedactedHTML,
+}
 
 
-	t, _ := template.ParseFiles("dumper_results.html")
-	t.Execute(w, template.HTML(buffer.String()))
+func getFieldHTML(tableName string, colName string, colData string) (string) {
+	// it is a link?
+	if _, isNonLink := non_links[colName]; strings.HasSuffix(colName, "_id") && !isNonLink {
+		return getLinkHTML(colName, colData)
+	}
+
+	if fn, ok := special_map[colName]; ok {
+		return fn(colData)
+	}
+
+	return colData
+}
+
+func getRedactedHTML(colData string) string {
+	if colData != "" {
+		return "<span style=\"color:red;\">REDACTED</SPAN>";
+	} else {
+		return ""
+	}
+}
+
+func getLinkHTML(colName string, colData string) (string) {
+	return fmt.Sprintf("<a href=\"?%s=%s\">%s</a>", colName, colData, colData)
 }
 
 func parseRowsToColsAndData(rows *sql.Rows) (columnNames []string, tableData[][]string){
@@ -76,39 +172,32 @@ func parseRowsToColsAndData(rows *sql.Rows) (columnNames []string, tableData[][]
 	// Get column names
 	columnNames, _ = rows.Columns()
 
-
-	// Make a slice for the values
-	values := make([]sql.RawBytes, len(columnNames))
-
-	// rows.Scan wants '[]interface{}' as an argument, so we must copy the
-	// references into such a slice
-	// See http://code.google.com/p/go-wiki/wiki/InterfaceSlice for details
-	scanArgs := make([]interface{}, len(values))
-	for i := range values {
-		scanArgs[i] = &values[i]
+	columns := make([]interface{}, len(columnNames))
+	columnPointers := make([]interface{}, len(columnNames))
+	for i := 0; i < len(columnNames); i++ {
+		columnPointers[i] = &columns[i]
 	}
 
 	// Fetch rows
 	for rows.Next() {
 		log.Println("looping over rows ")
 
-		// get RawBytes from data
-		_ = rows.Scan(scanArgs...)
+		if err := rows.Scan(columnPointers...); err != nil {
+			log.Fatalln(err)
+		}
 
 		// create the slice we'll use to return the data
 		rowData := make([]string, len(columnNames))
 
-		// Now do something with the data.
-		// Here we just print each column as a string.
-		var value string
-		for i, col := range values {
-			// Here we can check if the value is nil (NULL value)
-			if col == nil {
-				value = "NULL"
-			} else {
-				value = string(col)
+
+		for i, value := range columns {
+			switch value.(type) {
+			case []uint8:
+				sb := value.([]uint8)
+				rowData[i] = string(sb)
+			default:
+				rowData[i] = fmt.Sprintf("%v", value)
 			}
-			rowData[i] = value
 		}
 
 		tableData = append(tableData, rowData)
@@ -116,6 +205,7 @@ func parseRowsToColsAndData(rows *sql.Rows) (columnNames []string, tableData[][]
 
 	return
 }
+
 
 func dump2ColTableToHTML(rows *sql.Rows, tableName string) bytes.Buffer {
 
@@ -136,7 +226,7 @@ func dump2ColTableToHTML(rows *sql.Rows, tableName string) bytes.Buffer {
 		// Write the colname as a header
 		buffer.WriteString(fmt.Sprintf("<th>%s</th>", columnNames[i]))
 		// Write the val as a regular cell
-		buffer.WriteString(fmt.Sprintf("<td>%s</td>", getFieldHTML(columnNames[i],row[i])))
+		buffer.WriteString(fmt.Sprintf("<td>%s</td>", getFieldHTML(tableName, columnNames[i], row[i])))
 		buffer.WriteString("</tr>")
 	}
 	buffer.WriteString("</table>")
@@ -169,7 +259,7 @@ func dumpTableToHTML(rows *sql.Rows, tableName string) bytes.Buffer {
 		// Write each column
 		for i := 0; i < len(columnNames); i++ {
 			buffer.WriteString("<td>")
-			buffer.WriteString(getFieldHTML(columnNames[i],row[i]))
+			buffer.WriteString(getFieldHTML(tableName,columnNames[i],row[i]))
 			buffer.WriteString("</td>")
 		}
 		buffer.WriteString("</tr>")
@@ -180,30 +270,10 @@ func dumpTableToHTML(rows *sql.Rows, tableName string) bytes.Buffer {
 
 }
 
-var link_map = map[string]struct{}{
-	"pk" : {},
-}
-
-
-func getFieldHTML(colName string, colData string) (string) {
-	// is it a link?
-	if _, ok := link_map[colName]; ok {
-		return getLinkHTML(colName, colData)
-	}
-
-	return colData
-}
-
-func getLinkHTML(colName string, colData string) (string) {
-	//$link = $this->script_name . "?$field_name=$field_data";
-	//$display = $display ? $display : $field_data;
-	return fmt.Sprintf("<a href=\"?%s=%s\">%s</a>", colName, colData, colData)
-}
-
 func main() {
 	var err error
 	db, err = sql.Open("postgres",
-		"user= dbname= sslmode=disable")
+		"user=billmassie dbname=billmassie sslmode=disable")
 	defer db.Close()
 
 	if err != nil {
